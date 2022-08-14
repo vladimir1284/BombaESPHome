@@ -1,0 +1,238 @@
+esphome:
+  name: bomba  
+
+esp8266:
+  board: nodemcuv2
+  # esp8266_restore_from_flash: true
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  password: !secret api_password
+
+ota:
+  password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Bomba Fallback Hotspot"
+    password: "mCHGz6DQTo9r"
+
+# FSM component
+external_components:
+  - source:
+      type: git
+      url: https://github.com/muxa/esphome-state-machine
+
+state_machine:
+  - name: Pump State Machine
+    id: pump_fsm
+    initial_state: "IDLE"
+    states:
+      - name: "IDLE"
+        on_set:
+          - script.execute: stop_pumping 
+      - "WAIT"
+      - name: "PUMPING"
+        on_enter: 
+          - script.execute: start_pumping   
+        on_leave:
+          - script.execute: stop_pumping  
+      - "ERROR"
+    inputs:
+      - name: UPPER_EMPTY
+        transitions:
+          - IDLE -> PUMPING
+      - name: UPPER_FULL
+        transitions:
+          - PUMPING -> IDLE
+          - WAIT -> IDLE
+          - ERROR -> IDLE
+      - name: LOWER_EMPTY
+        transitions:
+          - PUMPING -> WAIT
+      - name: LOWER_FULL
+        transitions:
+          - WAIT -> PUMPING
+      - name: TIMEOUT
+        transitions:
+          - PUMPING -> ERROR
+
+    diagram: mermaid
+          
+text_sensor:
+  - platform: state_machine
+    name: Estado
+
+# Reset error from HA
+button:
+  - platform: template
+    name: "Restaurar Bomba"
+    id: reset_button
+    icon: "mdi:backup-restore"
+    on_press:
+      - state_machine.set: IDLE
+
+switch:
+  - platform: gpio
+    name: "Luz Taller"
+    pin: D1
+    inverted: true
+
+  - platform: gpio
+    name: "Bomba"
+    id: pump
+    pin: D2
+    inverted: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+binary_sensor:      
+
+  - platform: gpio
+    pin: D5
+    name: "PIR Sensor"
+    device_class: motion
+      
+  - platform: gpio
+    id: upperTank
+    name: Flotante Tanque Superior
+    pin:
+      number: D6
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      # Small filter, to debounce the switch
+      - delayed_on: 250ms
+      - delayed_off: 250ms
+
+  - platform: gpio
+    id: lowerTank
+    name: Flotante Tanque Inferior
+    pin:
+      number: D7
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      # Small filter, to debounce the switch
+      - delayed_on: 250ms
+      - delayed_off: 250ms
+      
+    on_press:
+      - state_machine.transition: LOWER_EMPTY
+
+    on_release:
+      - state_machine.transition: LOWER_FULL
+
+sensor:
+  - platform: adc
+    pin: A0
+    name: "Luminosidad del Taller"
+    update_interval: 60s
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: illuminance
+    filters:
+      - calibrate_linear:
+          - 0.0 -> 100
+          - 1.0 -> 0
+
+light:    
+  - platform: status_led
+    name: "Blue led"
+    pin: 
+      number: D4
+      inverted: true
+    id: blueLED
+  
+# Parameters to be modified from HA
+number:
+  - platform: template
+    id: pumpTimeoutHA
+    mode: BOX
+    name: Tiempo de Bombeo
+    unit_of_measurement: min
+    max_value: 240
+    min_value: 1
+    step: 1
+    optimistic: true
+    set_action:
+      - lambda: |-
+          id(pumpTimeout) = x*60000;
+          ESP_LOGD("number", "Delay is: %d ms", id(pumpTimeout));
+
+
+# Gobal variables to store settings and states
+globals:
+  - id: pumpTimeout
+    type: int
+    restore_value: yes
+    initial_value: '6000' # 10min
+
+  # fsmState values:
+  # 0 - IDLE
+  # 1 - WAIT
+  # 2 - PUMPING
+  # 3 - ERROR
+  - id: fsmState
+    type: int
+    restore_value: yes
+    initial_value: '0' # IDLE
+
+# Scripts for automations
+script:
+  - id: start_pumping
+    mode: restart
+    then:
+      - switch.turn_on: pump
+      
+      # Wait for the maximum allowed time
+      - delay: !lambda "return id(pumpTimeout);"
+
+      # Too long pumping, shutdown and go to error
+      - switch.turn_off: pump
+      - state_machine.transition: TIMEOUT
+
+  - id: stop_pumping
+    then:
+      - switch.turn_off: pump
+      - script.stop: start_pumping
+
+  - id: set_state
+    then:      
+      - if:
+          condition:
+            and:
+              - state_machine.state: IDLE
+              - binary_sensor.is_on: upperTank
+          then:        
+            - if:
+                condition:
+                  binary_sensor.is_on: lowerTank
+                then:        
+                  - state_machine.set: WAIT
+                else:
+                  - state_machine.transition: UPPER_EMPTY
+          else:
+            - if:
+                condition:
+                  binary_sensor.is_off: upperTank
+                then:
+                  - if:
+                      condition:
+                        not:
+                          state_machine.state: IDLE
+                      then:
+                        - state_machine.transition: UPPER_FULL
+
+
+# Synchronize state with upper tank sensor
+interval:
+  - interval: 1s
+    then:
+      - script.execute: set_state

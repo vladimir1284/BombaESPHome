@@ -1,5 +1,6 @@
 # BombaESPHome
 
+```mermaid
 stateDiagram-v2
   direction LR
   [*] --> IDLE
@@ -7,7 +8,7 @@ stateDiagram-v2
   PUMPING --> IDLE: UPPER_FULL
   WAIT --> IDLE: UPPER_FULL
   ERROR --> IDLE: UPPER_FULL
-  IDLE --> WAIT: LOWER_EMPTY
   PUMPING --> WAIT: LOWER_EMPTY
   WAIT --> PUMPING: LOWER_FULL
   PUMPING --> ERROR: TIMEOUT
+```
